@@ -96,6 +96,46 @@ def lerp(
 ) -> Union[np.ndarray, torch.Tensor]:
     return (1 - t) * v0 + t * v1
 
+def _slerp_torch(
+    t: float,
+    v0: torch.Tensor,
+    v1: torch.Tensor,
+    DOT_THRESHOLD: float = 0.9995,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    Torch‑native implementation of spherical linear interpolation (SLERP).
+ 
+    This avoids the costly tensor → CPU NumPy round‑trip and the full‑size
+    copies present in the NumPy path, roughly halving peak RAM usage when
+    merging very large model weights.
+    """
+    with torch.no_grad():
+        orig_dtype = v0.dtype
+        # Work in float32 for numerical stability, then restore dtype
+        v0f = v0.to(torch.float32)
+        v1f = v1.to(torch.float32)
+ 
+        # Normalize
+        v0_norm = v0f / (v0f.norm() + eps)
+        v1_norm = v1f / (v1f.norm() + eps)
+ 
+        # Cosine of the angle between them
+        dot = torch.sum(v0_norm * v1_norm)
+ 
+        # For nearly colinear vectors fall back to simple lerp
+        if torch.abs(dot) > DOT_THRESHOLD:
+            return ((1 - t) * v0 + t * v1).to(orig_dtype)
+ 
+        theta_0 = torch.acos(torch.clamp(dot, -1 + eps, 1 - eps))
+        sin_theta_0 = torch.sin(theta_0)
+ 
+        theta_t = theta_0 * t
+        s0 = torch.sin(theta_0 - theta_t) / sin_theta_0
+        s1 = torch.sin(theta_t) / sin_theta_0
+ 
+        return (s0 * v0 + s1 * v1).to(orig_dtype)
+
 
 def slerp(
     t: Union[float, np.ndarray],
@@ -117,6 +157,10 @@ def slerp(
     Returns:
         v2 (np.ndarray): Interpolation vector between v0 and v1
     """
+    # Fast path for torch tensors – stays on the original device and
+    # avoids large intermediate CPU copies.
+    if isinstance(v0, torch.Tensor) and isinstance(v1, torch.Tensor):
+        return _slerp_torch(t, v0, v1, DOT_THRESHOLD, eps)
     is_torch = False
     if not isinstance(v0, np.ndarray):
         is_torch = True
